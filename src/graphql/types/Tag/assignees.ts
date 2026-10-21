@@ -52,18 +52,29 @@ const cursorSchema = tagAssignmentsTableInsertSchema
 		createdAt: new Date(arg.createdAt),
 	}));
 
+/**
+ * Calculates the complexity of the Tag.assignees field.
+ *
+ * @param args - The field arguments containing pagination limits (`first` or `last`).
+ * @returns The calculated complexity object.
+ */
+export const assigneesComplexity = (args: {
+	first?: number | null | undefined;
+	last?: number | null | undefined;
+}) => {
+	return {
+		field: envConfig.API_GRAPHQL_OBJECT_FIELD_COST,
+		multiplier: args.first || args.last || 1,
+	};
+};
+
 Tag.implement({
 	fields: (t) => ({
 		assignees: t.connection(
 			{
 				description:
 					"GraphQL connection to traverse through the users that are assignees of the tag.",
-				complexity: (args) => {
-					return {
-						field: envConfig.API_GRAPHQL_OBJECT_FIELD_COST,
-						multiplier: args.first || args.last || 1,
-					};
-				},
+				complexity: assigneesComplexity,
 				resolve: async (parent, args, ctx) => {
 					const {
 						data: parsedArgs,
