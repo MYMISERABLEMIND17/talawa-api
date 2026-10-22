@@ -7,6 +7,18 @@ export type ActionItem = typeof actionItemsTable.$inferSelect & {
 
 export const ActionItem = builder.objectRef<ActionItem>("ActionItem");
 
+/**
+ * Resolves the isInstanceException boolean flag for an ActionItem.
+ *
+ * @param parent - ActionItem parent object potentially containing isInstanceException
+ * @returns Boolean flag indicating whether the action item is currently showing instance-specific exception data
+ */
+export const resolveIsInstanceException = (parent: {
+	isInstanceException?: boolean;
+}): boolean => {
+	return Boolean(parent.isInstanceException);
+};
+
 ActionItem.implement({
 	description:
 		"Represents an action item assigned to users, linked to events, categories, and organizations.",
@@ -43,12 +55,7 @@ ActionItem.implement({
 			type: "Boolean",
 			description:
 				"Indicates whether this action item is currently showing instance-specific exception data.",
-			resolve: (parent) => {
-				// This field will be set by the resolver when exceptions are applied
-				return Boolean(
-					(parent as { isInstanceException?: boolean }).isInstanceException,
-				);
-			},
+			resolve: resolveIsInstanceException,
 		}),
 	}),
 });
