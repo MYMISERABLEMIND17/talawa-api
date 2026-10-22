@@ -1,12 +1,27 @@
+import type { GraphQLContext } from "~/src/graphql/context";
 import { TalawaGraphQLError } from "~/src/utilities/TalawaGraphQLError";
-import type { GraphQLContext } from "../../context";
 import type { ActionItem as ActionItemType } from "./ActionItem";
+import { ActionItem } from "./ActionItem";
 
+/**
+ * Resolver for the updatedAt field on ActionItem.
+ * Returns the updatedAt timestamp if the current user is authenticated
+ * and is either a system administrator or has an organization membership with administrator privileges.
+ *
+ * @param parent - The ActionItem parent object
+ * @param _args - GraphQL arguments (unused)
+ * @param ctx - GraphQL context containing drizzle client, current client, and logger
+ * @returns The updatedAt Date timestamp
+ * @throws {TalawaGraphQLError} With code "unexpected" if parent.updatedAt is missing
+ * @throws {TalawaGraphQLError} With code "unauthenticated" if user is not logged in or not found in database
+ * @throws {TalawaGraphQLError} With code "unauthorized_action" if user lacks administrator permissions
+ * @throws {TalawaGraphQLError} With code "unexpected" for internal server errors
+ */
 export const actionItemUpdatedAtResolver = async (
 	parent: ActionItemType,
 	_args: unknown,
 	ctx: GraphQLContext,
-) => {
+): Promise<Date> => {
 	try {
 		if (!parent.updatedAt) {
 			throw new TalawaGraphQLError({
@@ -79,3 +94,14 @@ export const actionItemUpdatedAtResolver = async (
 		});
 	}
 };
+
+// Wire the resolver into ActionItem type.
+ActionItem.implement({
+	fields: (t) => ({
+		updatedAt: t.field({
+			description: "Date time at the time the action item was last updated.",
+			resolve: actionItemUpdatedAtResolver,
+			type: "DateTime",
+		}),
+	}),
+});
