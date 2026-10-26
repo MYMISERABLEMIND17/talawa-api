@@ -44,6 +44,22 @@ const cursorSchema = fundCampaignsTableInsertSchema.pick({
 	name: true,
 });
 
+/**
+ * Calculates the query complexity cost for the `campaigns` connection field on a Fund.
+ *
+ * @param args - Connection arguments containing pagination limits (`first` or `last`).
+ * @returns Complexity object with base field cost and multiplier based on requested count.
+ */
+export const campaignsComplexity = (args: {
+	first?: number | null | undefined;
+	last?: number | null | undefined;
+}) => {
+	return {
+		field: envConfig.API_GRAPHQL_OBJECT_FIELD_COST,
+		multiplier: args.first || args.last || 1,
+	};
+};
+
 Fund.implement({
 	fields: (t) => ({
 		campaigns: t.connection(
@@ -149,12 +165,7 @@ Fund.implement({
 						rawNodes: fundCampaigns,
 					});
 				},
-				complexity: (args) => {
-					return {
-						field: envConfig.API_GRAPHQL_OBJECT_FIELD_COST,
-						multiplier: args.first || args.last || 1,
-					};
-				},
+				complexity: campaignsComplexity,
 				type: FundCampaign,
 			},
 			{
