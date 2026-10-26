@@ -14,6 +14,22 @@ export const EventVolunteerGroup = builder.objectRef<EventVolunteerGroup>(
 );
 
 /**
+ * Resolver for `EventVolunteerGroup.isInstanceException` field.
+ * Indicates whether this volunteer group is currently showing instance-specific exception data.
+ *
+ * @param parent - The EventVolunteerGroup parent object.
+ * @returns Boolean flag indicating if instance-specific exception data is active.
+ */
+export const EventVolunteerGroupIsInstanceExceptionResolver = (
+	parent: EventVolunteerGroup,
+): boolean => {
+	// This field will be set by the resolver when exceptions are applied
+	return Boolean(
+		(parent as { isInstanceException?: boolean }).isInstanceException,
+	);
+};
+
+/**
  * GraphQL object type implementation for EventVolunteerGroup.
  * Represents a volunteer group for a specific event with a leader.
  */
@@ -66,12 +82,7 @@ EventVolunteerGroup.implement({
 			type: "Boolean",
 			description:
 				"Indicates whether this volunteer group is currently showing instance-specific exception data.",
-			resolve: (parent) => {
-				// This field will be set by the resolver when exceptions are applied
-				return Boolean(
-					(parent as { isInstanceException?: boolean }).isInstanceException,
-				);
-			},
+			resolve: EventVolunteerGroupIsInstanceExceptionResolver,
 		}),
 	}),
 });
