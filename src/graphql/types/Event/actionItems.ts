@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { and, eq, inArray, or } from "drizzle-orm";
-import type { z } from "zod";
+import { z } from "zod";
 import { actionItemExceptionsTable } from "~/src/drizzle/tables/actionItemExceptions";
 import {
 	actionItemsTable,
@@ -50,12 +50,26 @@ const cursorSchema = actionItemsTableInsertSchema
 		assignedAt: true,
 	})
 	.extend({
+		assignedAt: z.string().datetime(),
 		id: actionItemsTableInsertSchema.shape.id.unwrap(),
-	});
+	})
+	.transform((arg) => ({
+		assignedAt: new Date(arg.assignedAt),
+		id: arg.id,
+	}));
 
 type ActionItemsArgs = z.input<typeof defaultGraphQLConnectionArgumentsSchema>;
 
-// Export the resolver function so it can be tested
+/**
+ * Resolves a paginated list of action items for an event or recurring event instance,
+ * handling authentication, organization authorization, recurring instance exceptions,
+ * and cursor-based pagination.
+ *
+ * @param parent - The event or recurring event instance whose action items are being retrieved.
+ * @param args - Pagination arguments conforming to default GraphQL connection schema.
+ * @param ctx - The GraphQL execution context with client authentication and database access.
+ * @returns A GraphQL connection object containing edges and pageInfo.
+ */
 export const resolveActionItemsPaginated = async (
 	parent: EventType,
 	args: ActionItemsArgs,
@@ -236,6 +250,22 @@ export const resolveActionItemsPaginated = async (
 	});
 };
 
+/**
+ * Calculates the query complexity for the event's action items connection.
+ *
+ * @param args - Connection arguments containing optional `first` or `last` limits.
+ * @returns Complexity object with field cost and calculated multiplier based on requested limit.
+ */
+export const actionItemsComplexity = (args: {
+	first?: number | null;
+	last?: number | null;
+}) => {
+	return {
+		field: envConfig.API_GRAPHQL_OBJECT_FIELD_COST,
+		multiplier: args.first || args.last || 1,
+	};
+};
+
 Event.implement({
 	fields: (t) => ({
 		actionItems: t.connection(
@@ -244,12 +274,7 @@ Event.implement({
 					"GraphQL connection to traverse through the action items associated with this event.",
 				resolve: resolveActionItemsPaginated,
 				type: ActionItem,
-				complexity: (args) => {
-					return {
-						field: envConfig.API_GRAPHQL_OBJECT_FIELD_COST,
-						multiplier: args.first || args.last || 1,
-					};
-				},
+				complexity: actionItemsComplexity,
 			},
 			{
 				edgesField: {
