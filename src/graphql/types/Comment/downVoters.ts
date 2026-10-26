@@ -61,18 +61,29 @@ const cursorSchema = z
 		creatorId: arg.creatorId,
 	}));
 
+/**
+ * Calculates the query complexity cost for the `downVoters` connection field on a Comment.
+ *
+ * @param args - Connection arguments containing pagination limits (`first` or `last`).
+ * @returns Complexity object with base field cost and multiplier based on requested count.
+ */
+export const downVotersComplexity = (args: {
+	first?: number | null | undefined;
+	last?: number | null | undefined;
+}) => {
+	return {
+		field: envConfig.API_GRAPHQL_OBJECT_FIELD_COST,
+		multiplier: args.first || args.last || 1,
+	};
+};
+
 Comment.implement({
 	fields: (t) => ({
 		downVoters: t.connection(
 			{
 				description:
 					"GraphQL connection to traverse through the users that down voted the comment.",
-				complexity: (args) => {
-					return {
-						field: envConfig.API_GRAPHQL_OBJECT_FIELD_COST,
-						multiplier: args.first || args.last || 1,
-					};
-				},
+				complexity: downVotersComplexity,
 				resolve: async (parent, args, ctx) => {
 					const {
 						data: parsedArgs,
