@@ -4,6 +4,7 @@ import {
 	venueBookingsTable,
 	venueBookingsTableInsertSchema,
 } from "~/src/drizzle/tables/venueBookings";
+import type { GraphQLContext } from "~/src/graphql/context";
 import { Venue } from "~/src/graphql/types/Venue/Venue";
 import envConfig from "~/src/utilities/graphqLimits";
 import {
@@ -12,6 +13,7 @@ import {
 	transformToDefaultGraphQLConnection,
 } from "~/src/utilities/graphqlConnection";
 import { TalawaGraphQLError } from "~/src/utilities/TalawaGraphQLError";
+import type { Event as EventType } from "./Event";
 import { Event } from "./Event";
 
 const venuesArgumentsSchema = defaultGraphQLConnectionArgumentsSchema
@@ -52,151 +54,174 @@ const cursorSchema = venueBookingsTableInsertSchema
 		venueId: arg.venueId,
 	}));
 
+type VenuesArgs = z.input<typeof defaultGraphQLConnectionArgumentsSchema>;
+
+/**
+ * Resolves a paginated list of venues booked for a specific event using cursor-based pagination.
+ *
+ * Supports forward and backward pagination with sorting by booking creation timestamp and venue ID.
+ *
+ * @param parent - The event instance whose booked venues are being requested.
+ * @param args - Connection arguments including pagination limits (`first`, `last`) and cursors (`after`, `before`).
+ * @param ctx - The GraphQL execution context containing the database client.
+ * @returns A GraphQL connection object with edges, nodes, and pageInfo.
+ */
+export const resolveEventVenuesPaginated = async (
+	parent: EventType,
+	args: VenuesArgs,
+	ctx: GraphQLContext,
+) => {
+	const {
+		data: parsedArgs,
+		error,
+		success,
+	} = venuesArgumentsSchema.safeParse(args);
+
+	if (!success) {
+		throw new TalawaGraphQLError({
+			extensions: {
+				code: "invalid_arguments",
+				issues: error.issues.map((issue) => ({
+					argumentPath: issue.path,
+					message: issue.message,
+				})),
+			},
+		});
+	}
+
+	const { cursor, isInversed, limit } = parsedArgs;
+
+	const orderBy = isInversed
+		? [asc(venueBookingsTable.createdAt), asc(venueBookingsTable.venueId)]
+		: [desc(venueBookingsTable.createdAt), desc(venueBookingsTable.venueId)];
+
+	let where: SQL | undefined;
+
+	if (isInversed) {
+		if (cursor !== undefined) {
+			where = and(
+				exists(
+					ctx.drizzleClient
+						.select()
+						.from(venueBookingsTable)
+						.where(
+							and(
+								eq(venueBookingsTable.createdAt, cursor.createdAt),
+								eq(venueBookingsTable.eventId, parent.id),
+								eq(venueBookingsTable.venueId, cursor.venueId),
+							),
+						),
+				),
+				eq(venueBookingsTable.eventId, parent.id),
+				or(
+					and(
+						eq(venueBookingsTable.createdAt, cursor.createdAt),
+						gt(venueBookingsTable.venueId, cursor.venueId),
+					),
+					gt(venueBookingsTable.createdAt, cursor.createdAt),
+				),
+			);
+		} else {
+			where = eq(venueBookingsTable.eventId, parent.id);
+		}
+	} else {
+		if (cursor !== undefined) {
+			where = and(
+				exists(
+					ctx.drizzleClient
+						.select()
+						.from(venueBookingsTable)
+						.where(
+							and(
+								eq(venueBookingsTable.createdAt, cursor.createdAt),
+								eq(venueBookingsTable.eventId, parent.id),
+								eq(venueBookingsTable.venueId, cursor.venueId),
+							),
+						),
+				),
+				eq(venueBookingsTable.eventId, parent.id),
+				or(
+					and(
+						eq(venueBookingsTable.createdAt, cursor.createdAt),
+						lt(venueBookingsTable.venueId, cursor.venueId),
+					),
+					lt(venueBookingsTable.createdAt, cursor.createdAt),
+				),
+			);
+		} else {
+			where = eq(venueBookingsTable.eventId, parent.id);
+		}
+	}
+
+	const venueBookings =
+		await ctx.drizzleClient.query.venueBookingsTable.findMany({
+			columns: {
+				createdAt: true,
+				venueId: true,
+			},
+			limit,
+			orderBy,
+			where,
+			with: {
+				venue: {
+					with: {
+						attachmentsWhereVenue: true,
+					},
+				},
+			},
+		});
+
+	if (cursor !== undefined && venueBookings.length === 0) {
+		throw new TalawaGraphQLError({
+			extensions: {
+				code: "arguments_associated_resources_not_found",
+				issues: [
+					{
+						argumentPath: [isInversed ? "before" : "after"],
+					},
+				],
+			},
+		});
+	}
+
+	return transformToDefaultGraphQLConnection({
+		createCursor: (booking) => ({
+			createdAt: booking.createdAt,
+			venueId: booking.venueId,
+		}),
+		createNode: ({ venue: { attachmentsWhereVenue, ...venue } }) =>
+			Object.assign(venue, {
+				attachments: attachmentsWhereVenue,
+			}),
+		parsedArgs,
+		rawNodes: venueBookings,
+	});
+};
+
+/**
+ * Calculates query complexity for the event venues connection field.
+ *
+ * @param args - Connection arguments containing optional `first` or `last` limits.
+ * @returns Complexity object with field cost and calculated multiplier.
+ */
+export const venuesComplexity = (args: {
+	first?: number | null;
+	last?: number | null;
+}) => {
+	return {
+		field: envConfig.API_GRAPHQL_OBJECT_FIELD_COST,
+		multiplier: args.first || args.last || 1,
+	};
+};
+
 Event.implement({
 	fields: (t) => ({
 		venues: t.connection(
 			{
 				description:
 					"GraphQL connection to traverse through the venues that are booked for the event.",
-				resolve: async (parent, args, ctx) => {
-					const {
-						data: parsedArgs,
-						error,
-						success,
-					} = venuesArgumentsSchema.safeParse(args);
-
-					if (!success) {
-						throw new TalawaGraphQLError({
-							extensions: {
-								code: "invalid_arguments",
-								issues: error.issues.map((issue) => ({
-									argumentPath: issue.path,
-									message: issue.message,
-								})),
-							},
-						});
-					}
-
-					const { cursor, isInversed, limit } = parsedArgs;
-
-					const orderBy = isInversed
-						? [
-								asc(venueBookingsTable.createdAt),
-								asc(venueBookingsTable.venueId),
-							]
-						: [
-								desc(venueBookingsTable.createdAt),
-								desc(venueBookingsTable.venueId),
-							];
-
-					let where: SQL | undefined;
-
-					if (isInversed) {
-						if (cursor !== undefined) {
-							where = and(
-								exists(
-									ctx.drizzleClient
-										.select()
-										.from(venueBookingsTable)
-										.where(
-											and(
-												eq(venueBookingsTable.createdAt, cursor.createdAt),
-												eq(venueBookingsTable.eventId, parent.id),
-												eq(venueBookingsTable.venueId, cursor.venueId),
-											),
-										),
-								),
-								eq(venueBookingsTable.eventId, parent.id),
-								or(
-									and(
-										eq(venueBookingsTable.createdAt, cursor.createdAt),
-										gt(venueBookingsTable.venueId, cursor.venueId),
-									),
-									gt(venueBookingsTable.createdAt, cursor.createdAt),
-								),
-							);
-						} else {
-							where = eq(venueBookingsTable.eventId, parent.id);
-						}
-					} else {
-						if (cursor !== undefined) {
-							where = and(
-								exists(
-									ctx.drizzleClient
-										.select()
-										.from(venueBookingsTable)
-										.where(
-											and(
-												eq(venueBookingsTable.createdAt, cursor.createdAt),
-												eq(venueBookingsTable.eventId, parent.id),
-												eq(venueBookingsTable.venueId, cursor.venueId),
-											),
-										),
-								),
-								eq(venueBookingsTable.eventId, parent.id),
-								or(
-									and(
-										eq(venueBookingsTable.createdAt, cursor.createdAt),
-										lt(venueBookingsTable.venueId, cursor.venueId),
-									),
-									lt(venueBookingsTable.createdAt, cursor.createdAt),
-								),
-							);
-						} else {
-							where = eq(venueBookingsTable.eventId, parent.id);
-						}
-					}
-
-					const venueBookings =
-						await ctx.drizzleClient.query.venueBookingsTable.findMany({
-							columns: {
-								createdAt: true,
-								venueId: true,
-							},
-							limit,
-							orderBy,
-							where,
-							with: {
-								venue: {
-									with: {
-										attachmentsWhereVenue: true,
-									},
-								},
-							},
-						});
-
-					if (cursor !== undefined && venueBookings.length === 0) {
-						throw new TalawaGraphQLError({
-							extensions: {
-								code: "arguments_associated_resources_not_found",
-								issues: [
-									{
-										argumentPath: [isInversed ? "before" : "after"],
-									},
-								],
-							},
-						});
-					}
-
-					return transformToDefaultGraphQLConnection({
-						createCursor: (booking) => ({
-							createdAt: booking.createdAt,
-							venueId: booking.venueId,
-						}),
-						createNode: ({ venue: { attachmentsWhereVenue, ...venue } }) =>
-							Object.assign(venue, {
-								attachments: attachmentsWhereVenue,
-							}),
-						parsedArgs,
-						rawNodes: venueBookings,
-					});
-				},
-				complexity: (args) => {
-					return {
-						field: envConfig.API_GRAPHQL_OBJECT_FIELD_COST,
-						multiplier: args.first || args.last || 1,
-					};
-				},
+				resolve: resolveEventVenuesPaginated,
+				complexity: venuesComplexity,
 				type: Venue,
 			},
 			{
