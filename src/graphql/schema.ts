@@ -18,15 +18,19 @@ export const schema = builder.toSchema({
 });
 
 /**
- * Initialize the schema with plugin integration
- * This should be called during server startup
+ * Initialize the schema with plugin integration.
+ * This should be called during server startup.
+ *
+ * @returns The initialized GraphQLSchema with loaded plugins integrated.
  */
 export async function initializeSchemaWithPlugins() {
 	return await schemaManager.buildInitialSchema();
 }
 
 /**
- * Get the current schema (with plugins if initialized)
+ * Get the current schema (with plugins if initialized, or the base schema).
+ *
+ * @returns The active GraphQLSchema.
  */
 export function getCurrentSchema() {
 	return schemaManager.getCurrentSchema() || schema;
