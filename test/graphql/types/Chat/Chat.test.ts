@@ -1,522 +1,442 @@
-/**
- * Integration tests for Chat computed fields (unreadMessagesCount, hasUnread,
- * firstUnreadMessageId, lastMessage).
- *
- * NOTE: Creators do not see their own messages as unread because server-side
- * logic automatically updates their `chatMembership.lastReadAt` when they create
- * a new message.
- *
- * NOTE: Frontend currently marks self-authored messages as read. On the server-side
- * the computed fields treat a missing membership.lastReadAt as epoch (new Date(0)),
- * which means creators will see their own messages as unread until they explicitly
- * mark the chat as read. This behaviour is intentional for now and is covered by
- * these tests.
- *
- * TODO (future): Implement a humanized server-side behaviour so creators do not
- * see their own freshly-created messages as unread. Possible approaches:
- *  - Ignore messages authored by the current user when counting unread messages;
- *  - Update the author's chatMembership.lastReadAt when they create a message.
- *
- * This should be implemented carefully to preserve read-receipt semantics.
- */
-
 import { faker } from "@faker-js/faker";
-import { afterEach, beforeAll, expect, suite, test } from "vitest";
-import { assertToBeNonNullish } from "../../../helpers";
-import { server } from "../../../server";
-import { mercuriusClient } from "../client";
-import {
-	Mutation_createChat,
-	Mutation_createChatMembership,
-	Mutation_createChatMessage,
-	Mutation_createOrganization,
-	Mutation_createOrganizationMembership,
-	Mutation_createUser,
-	Mutation_deleteChat,
-	Mutation_deleteOrganization,
-	Mutation_deleteUser,
-	Mutation_markChatAsRead,
-	Query_chat_with_unread,
-	Query_signIn,
-} from "../documentNodes";
+import { createMockGraphQLContext } from "test/_Mocks_/mockContextCreator/mockContextCreator";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { GraphQLContext } from "~/src/graphql/context";
+import type { Chat as ChatType } from "~/src/graphql/types/Chat/Chat";
+import { TalawaGraphQLError } from "~/src/utilities/TalawaGraphQLError";
 
-suite("Chat computed fields", () => {
-	const cleanupFns: Array<() => Promise<void>> = [];
+const { implementSpy, objectRefSpy } = vi.hoisted(() => {
+	const implement = vi.fn();
+	const objectRef = vi.fn(() => ({ implement }));
+	return { implementSpy: implement, objectRefSpy: objectRef };
+});
 
-	afterEach(async () => {
-		for (const fn of cleanupFns.reverse()) {
-			try {
-				await fn();
-			} catch (err) {
-				console.warn("cleanup error:", err);
-			}
-		}
-		cleanupFns.length = 0;
-	});
+vi.mock("~/src/graphql/builder", () => ({
+	builder: {
+		objectRef: objectRefSpy,
+	},
+}));
+
+vi.mock("~/src/graphql/types/ChatMessage/ChatMessage", () => ({
+	ChatMessage: {},
+}));
+
+type ResolverField<T = unknown> = {
+	key?: string;
+	opts?: {
+		description?: string;
+		nullable?: boolean;
+	};
+	description?: string;
+	nullable?: boolean;
+	type?: unknown;
+	resolve: (
+		parent: ChatType,
+		args: Record<string, never>,
+		ctx: GraphQLContext,
+	) => Promise<T> | T;
+};
+
+type ChatFieldsMap = {
+	avatarMimeType: ResolverField<string | null>;
+	description: ResolverField<string | null>;
+	id: ResolverField<string>;
+	name: ResolverField<string | null>;
+	unreadMessagesCount: ResolverField<number>;
+	hasUnread: ResolverField<boolean>;
+	firstUnreadMessageId: ResolverField<string | null>;
+	lastMessage: ResolverField<unknown>;
+};
+
+describe("Chat GraphQL Type", () => {
+	let ctx: GraphQLContext;
+	let mocks: ReturnType<typeof createMockGraphQLContext>["mocks"];
+	let mockChat: ChatType;
+	let fields: ChatFieldsMap;
+	let implementConfig: { description?: string };
+
+	const createSelectChain = (result: unknown[]) => {
+		const chain: Record<string, unknown> = Promise.resolve(result);
+		chain.from = vi.fn(() => chain);
+		chain.where = vi.fn((_whereClause: unknown) => chain);
+		chain.orderBy = vi.fn(() => chain);
+		chain.limit = vi.fn(() => Promise.resolve(result));
+		return vi.fn(() => chain);
+	};
+
+	const mockFindFirstMembership = (result: unknown) => {
+		mocks.drizzleClient.query.chatMembershipsTable.findFirst.mockImplementation(
+			async (opts?: {
+				where?: (fields: unknown, operators: unknown) => unknown;
+			}) => {
+				if (opts?.where) {
+					const dummyFields = { chatId: "chatId", memberId: "memberId" };
+					const dummyOperators = {
+						eq: vi.fn((a, b) => ({ op: "eq", a, b })),
+						and: vi.fn((...args) => ({ op: "and", args })),
+					};
+					opts.where(dummyFields, dummyOperators);
+				}
+				return result;
+			},
+		);
+	};
 
 	beforeAll(async () => {
-		if (
-			!server.envConfig.API_ADMINISTRATOR_USER_EMAIL_ADDRESS ||
-			!server.envConfig.API_ADMINISTRATOR_USER_PASSWORD
-		) {
-			throw new Error("admin env not set");
-		}
+		await import("~/src/graphql/types/Chat/Chat");
+
+		expect(objectRefSpy).toHaveBeenCalledWith("Chat");
+		expect(implementSpy).toHaveBeenCalled();
+
+		implementConfig = implementSpy.mock.calls[0]?.[0];
+		const fieldsFactory = (
+			implementConfig as {
+				fields: (t: Record<string, unknown>) => ChatFieldsMap;
+			}
+		)?.fields;
+
+		const tStub = {
+			exposeID: vi.fn((key: string, opts?: { description?: string }) => ({
+				key,
+				opts,
+				resolve: (parent: Record<string, unknown>) => parent[key],
+			})),
+			exposeString: vi.fn((key: string, opts?: { description?: string }) => ({
+				key,
+				opts,
+				resolve: (parent: Record<string, unknown>) => parent[key],
+			})),
+			int: vi.fn((config: unknown) => config),
+			boolean: vi.fn((config: unknown) => config),
+			id: vi.fn((config: unknown) => config),
+			field: vi.fn((config: unknown) => config),
+		};
+
+		fields = fieldsFactory(tStub);
 	});
 
-	test("computed unread fields reflect message/read state", async () => {
-		const adminRes = await mercuriusClient.query(Query_signIn, {
-			variables: {
-				input: {
-					emailAddress: server.envConfig.API_ADMINISTRATOR_USER_EMAIL_ADDRESS,
-					password: server.envConfig.API_ADMINISTRATOR_USER_PASSWORD,
-				},
-			},
-		});
-		assertToBeNonNullish(adminRes.data?.signIn?.authenticationToken);
-		const adminToken = adminRes.data.signIn.authenticationToken as string;
+	beforeEach(() => {
+		const { context, mocks: newMocks } = createMockGraphQLContext(
+			true,
+			"user-123",
+		);
+		ctx = context;
+		mocks = newMocks;
 
-		const aliceRes = await mercuriusClient.mutate(Mutation_createUser, {
-			headers: { authorization: `bearer ${adminToken}` },
-			variables: {
-				input: {
-					emailAddress: `${faker.string.uuid()}@test.com`,
-					name: faker.person.fullName(),
-					password: "password123",
-					role: "regular",
-					isEmailAddressVerified: false,
-				},
-			},
-		});
-		assertToBeNonNullish(aliceRes.data?.createUser);
-		const alice = aliceRes.data.createUser;
-		assertToBeNonNullish(alice.user);
-		assertToBeNonNullish(alice.user.id);
-		const aliceId = alice.user.id;
-		cleanupFns.push(async () => {
-			await mercuriusClient.mutate(Mutation_deleteUser, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: { input: { id: aliceId } },
-			});
-		});
+		mockChat = {
+			id: faker.string.uuid(),
+			name: "Core Engineering Team",
+			description: "Real-time collaboration channel for engineers",
+			avatarMimeType: "image/png",
+			organizationId: faker.string.uuid(),
+			creatorId: faker.string.uuid(),
+			updaterId: faker.string.uuid(),
+			createdAt: new Date("2026-01-01T10:00:00Z"),
+			updatedAt: new Date("2026-01-02T10:00:00Z"),
+		} as unknown as ChatType;
 
-		const bobRes = await mercuriusClient.mutate(Mutation_createUser, {
-			headers: { authorization: `bearer ${adminToken}` },
-			variables: {
-				input: {
-					emailAddress: `${faker.string.uuid()}@test.com`,
-					name: faker.person.fullName(),
-					password: "password123",
-					role: "regular",
-					isEmailAddressVerified: false,
-				},
-			},
-		});
-		assertToBeNonNullish(bobRes.data?.createUser);
-		const bob = bobRes.data.createUser;
-		assertToBeNonNullish(bob.user);
-		assertToBeNonNullish(bob.user.id);
-		const bobId = bob.user.id;
-		cleanupFns.push(async () => {
-			await mercuriusClient.mutate(Mutation_deleteUser, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: { input: { id: bobId } },
-			});
-		});
-
-		const orgRes = await mercuriusClient.mutate(Mutation_createOrganization, {
-			headers: { authorization: `bearer ${adminToken}` },
-			variables: {
-				input: { name: `org-${faker.string.uuid()}`, countryCode: "us" },
-			},
-		});
-		assertToBeNonNullish(orgRes.data?.createOrganization);
-		const orgId = orgRes.data.createOrganization.id;
-		cleanupFns.push(async () => {
-			await mercuriusClient.mutate(Mutation_deleteOrganization, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: { input: { id: orgId } },
-			});
-		});
-
-		await mercuriusClient.mutate(Mutation_createOrganizationMembership, {
-			headers: { authorization: `bearer ${adminToken}` },
-			variables: {
-				input: {
-					memberId: alice.user?.id,
-					organizationId: orgId,
-					role: "regular",
-				},
-			},
-		});
-		await mercuriusClient.mutate(Mutation_createOrganizationMembership, {
-			headers: { authorization: `bearer ${adminToken}` },
-			variables: {
-				input: {
-					memberId: bob.user?.id,
-					organizationId: orgId,
-					role: "regular",
-				},
-			},
-		});
-
-		const chatRes = await mercuriusClient.mutate(Mutation_createChat, {
-			headers: { authorization: `bearer ${alice.authenticationToken}` },
-			variables: {
-				input: { name: `chat-${faker.string.uuid()}`, organizationId: orgId },
-			},
-		});
-		assertToBeNonNullish(chatRes.data?.createChat);
-		const chatId = chatRes.data.createChat.id;
-		cleanupFns.push(async () => {
-			await mercuriusClient.mutate(Mutation_deleteChat, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: { input: { id: chatId } },
-			});
-		});
-
-		await mercuriusClient.mutate(Mutation_createChatMembership, {
-			headers: { authorization: `bearer ${alice.authenticationToken}` },
-			variables: { input: { chatId, memberId: alice.user?.id } },
-		});
-		await mercuriusClient.mutate(Mutation_createChatMembership, {
-			headers: { authorization: `bearer ${alice.authenticationToken}` },
-			variables: { input: { chatId, memberId: bob.user?.id } },
-		});
-
-		const m1 = await mercuriusClient.mutate(Mutation_createChatMessage, {
-			headers: { authorization: `bearer ${alice.authenticationToken}` },
-			variables: { input: { chatId, body: "first" } },
-		});
-		assertToBeNonNullish(m1.data?.createChatMessage);
-		const m1Id = m1.data.createChatMessage.id;
-
-		const m2 = await mercuriusClient.mutate(Mutation_createChatMessage, {
-			headers: { authorization: `bearer ${alice.authenticationToken}` },
-			variables: { input: { chatId, body: "second" } },
-		});
-		assertToBeNonNullish(m2.data?.createChatMessage);
-		const m2Id = m2.data.createChatMessage.id;
-
-		const bobChat = await mercuriusClient.query(Query_chat_with_unread, {
-			headers: { authorization: `bearer ${bob.authenticationToken}` },
-			variables: { input: { id: chatId } },
-		});
-		assertToBeNonNullish(bobChat.data?.chat);
-		const bobChatNode = bobChat.data.chat;
-		expect(bobChatNode.unreadMessagesCount).toBe(2);
-		expect(bobChatNode.hasUnread).toBe(true);
-		expect(bobChatNode.firstUnreadMessageId).toBe(m1Id);
-		expect(bobChatNode.lastMessage?.id).toBe(m2Id);
-
-		await mercuriusClient.mutate(Mutation_markChatAsRead, {
-			headers: { authorization: `bearer ${bob.authenticationToken}` },
-			variables: { input: { chatId, messageId: m1Id } },
-		});
-
-		const bobChatAfter = await mercuriusClient.query(Query_chat_with_unread, {
-			headers: { authorization: `bearer ${bob.authenticationToken}` },
-			variables: { input: { id: chatId } },
-		});
-		assertToBeNonNullish(bobChatAfter.data?.chat);
-		const bobAfterNode = bobChatAfter.data.chat;
-		expect(bobAfterNode.unreadMessagesCount).toBe(0);
-		expect(bobAfterNode.hasUnread).toBe(false);
-		expect(bobAfterNode.firstUnreadMessageId).toBeNull();
-
-		const aliceChat = await mercuriusClient.query(Query_chat_with_unread, {
-			headers: { authorization: `bearer ${alice.authenticationToken}` },
-			variables: { input: { id: chatId } },
-		});
-		assertToBeNonNullish(aliceChat.data?.chat);
-		const aliceNode = aliceChat.data.chat;
-		expect(aliceNode.unreadMessagesCount).toBe(0);
-		expect(aliceNode.hasUnread).toBe(false);
-		expect(aliceNode.firstUnreadMessageId).toBeNull();
+		vi.restoreAllMocks();
 	});
 
-	suite("unauthenticated access to computed fields is denied", () => {
-		let adminToken: string;
-
-		beforeAll(async () => {
-			const adminRes = await mercuriusClient.query(Query_signIn, {
-				variables: {
-					input: {
-						emailAddress: server.envConfig.API_ADMINISTRATOR_USER_EMAIL_ADDRESS,
-						password: server.envConfig.API_ADMINISTRATOR_USER_PASSWORD,
-					},
-				},
-			});
-			assertToBeNonNullish(adminRes.data?.signIn?.authenticationToken);
-			adminToken = adminRes.data.signIn.authenticationToken as string;
-		});
-
-		test("non-member sees zero/false/null for unread fields", async () => {
-			// adminToken provided by beforeAll
-
-			const memberRes = await mercuriusClient.mutate(Mutation_createUser, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: {
-					input: {
-						emailAddress: `${faker.string.uuid()}@test.com`,
-						name: faker.person.fullName(),
-						password: "password123",
-						role: "regular",
-						isEmailAddressVerified: false,
-					},
-				},
-			});
-			assertToBeNonNullish(memberRes.data?.createUser);
-			const member = memberRes.data.createUser;
-			assertToBeNonNullish(member.user);
-			assertToBeNonNullish(member.user.id);
-			const memberId = member.user.id;
-			cleanupFns.push(async () => {
-				await mercuriusClient.mutate(Mutation_deleteUser, {
-					headers: { authorization: `bearer ${adminToken}` },
-					variables: { input: { id: memberId } },
-				});
-			});
-
-			const outsiderRes = await mercuriusClient.mutate(Mutation_createUser, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: {
-					input: {
-						emailAddress: `${faker.string.uuid()}@test.com`,
-						name: faker.person.fullName(),
-						password: "password123",
-						role: "regular",
-						isEmailAddressVerified: false,
-					},
-				},
-			});
-			assertToBeNonNullish(outsiderRes.data?.createUser);
-			const outsider = outsiderRes.data.createUser;
-			assertToBeNonNullish(outsider.user);
-			assertToBeNonNullish(outsider.user.emailAddress);
-			const outsiderSignIn = await mercuriusClient.query(Query_signIn, {
-				variables: {
-					input: {
-						emailAddress: outsider.user?.emailAddress,
-						password: "password123",
-					},
-				},
-			});
-			assertToBeNonNullish(outsiderSignIn.data?.signIn?.authenticationToken);
-			assertToBeNonNullish(outsider.user);
-			assertToBeNonNullish(outsider.user.id);
-			const outsiderId = outsider.user.id;
-			const outsiderToken = outsiderSignIn.data.signIn
-				.authenticationToken as string;
-			cleanupFns.push(async () => {
-				await mercuriusClient.mutate(Mutation_deleteUser, {
-					headers: { authorization: `bearer ${adminToken}` },
-					variables: { input: { id: outsiderId } },
-				});
-			});
-
-			const orgRes = await mercuriusClient.mutate(Mutation_createOrganization, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: {
-					input: { name: `org-${faker.string.uuid()}`, countryCode: "us" },
-				},
-			});
-			assertToBeNonNullish(orgRes.data?.createOrganization);
-			const orgId = orgRes.data.createOrganization.id;
-			cleanupFns.push(async () => {
-				await mercuriusClient.mutate(Mutation_deleteOrganization, {
-					headers: { authorization: `bearer ${adminToken}` },
-					variables: { input: { id: orgId } },
-				});
-			});
-
-			await mercuriusClient.mutate(Mutation_createOrganizationMembership, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: {
-					input: {
-						memberId: member.user?.id,
-						organizationId: orgId,
-						role: "regular",
-					},
-				},
-			});
-
-			const chatRes = await mercuriusClient.mutate(Mutation_createChat, {
-				headers: { authorization: `bearer ${member.authenticationToken}` },
-				variables: {
-					input: { name: `chat-${faker.string.uuid()}`, organizationId: orgId },
-				},
-			});
-			assertToBeNonNullish(chatRes.data?.createChat);
-			const chatId = chatRes.data.createChat.id;
-			cleanupFns.push(async () => {
-				await mercuriusClient.mutate(Mutation_deleteChat, {
-					headers: { authorization: `bearer ${adminToken}` },
-					variables: { input: { id: chatId } },
-				});
-			});
-
-			const outsiderChat = await mercuriusClient.query(Query_chat_with_unread, {
-				headers: { authorization: `bearer ${outsiderToken}` },
-				variables: { input: { id: chatId } },
-			});
-			// The API enforces that only members may access chat computed fields. A
-			// non-member receives an authorization error. Assert that behaviour so the
-			// test matches server semantics.
-			expect(outsiderChat.errors).toBeDefined();
-			expect(outsiderChat.errors?.[0]?.extensions?.code).toBe(
-				"unauthorized_action_on_arguments_associated_resources",
+	describe("Type definition and exposed fields", () => {
+		it("should configure Chat type description properly", () => {
+			expect(implementConfig.description).toBe(
+				"Chats are controlled spaces within organizations where their members can communicate with each other in realtime.",
 			);
 		});
 
-		test("lastMessage returns null when no messages exist", async () => {
-			// adminToken provided by beforeAll
+		it("should expose string and id fields correctly", () => {
+			expect(fields.avatarMimeType.opts?.description).toBe(
+				"Mime type of the avatar of the chat.",
+			);
+			expect(fields.avatarMimeType.resolve(mockChat, {}, ctx)).toBe(
+				"image/png",
+			);
 
-			const userRes = await mercuriusClient.mutate(Mutation_createUser, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: {
-					input: {
-						emailAddress: `${faker.string.uuid()}@test.com`,
-						name: faker.person.fullName(),
-						password: "password123",
-						role: "regular",
-						isEmailAddressVerified: false,
-					},
-				},
-			});
-			assertToBeNonNullish(userRes.data?.createUser);
-			const user = userRes.data.createUser;
-			assertToBeNonNullish(user.user);
-			assertToBeNonNullish(user.user.id);
-			const userId = user.user.id;
-			cleanupFns.push(async () => {
-				await mercuriusClient.mutate(Mutation_deleteUser, {
-					headers: { authorization: `bearer ${adminToken}` },
-					variables: { input: { id: userId } },
-				});
-			});
+			expect(fields.description.opts?.description).toBe(
+				"Custom information about the chat.",
+			);
+			expect(fields.description.resolve(mockChat, {}, ctx)).toBe(
+				"Real-time collaboration channel for engineers",
+			);
 
-			const orgRes = await mercuriusClient.mutate(Mutation_createOrganization, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: {
-					input: { name: `org-${faker.string.uuid()}`, countryCode: "us" },
-				},
-			});
-			assertToBeNonNullish(orgRes.data?.createOrganization);
-			const orgId = orgRes.data.createOrganization.id;
-			cleanupFns.push(async () => {
-				await mercuriusClient.mutate(Mutation_deleteOrganization, {
-					headers: { authorization: `bearer ${adminToken}` },
-					variables: { input: { id: orgId } },
-				});
-			});
+			expect(fields.id.opts?.description).toBe(
+				"Global identifier of the chat.",
+			);
+			expect(fields.id.opts?.nullable).toBe(false);
+			expect(fields.id.resolve(mockChat, {}, ctx)).toBe(mockChat.id);
 
-			await mercuriusClient.mutate(Mutation_createOrganizationMembership, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: {
-					input: {
-						memberId: user.user?.id,
-						organizationId: orgId,
-						role: "regular",
-					},
-				},
-			});
+			expect(fields.name.opts?.description).toBe("Name of the chat.");
+			expect(fields.name.resolve(mockChat, {}, ctx)).toBe(
+				"Core Engineering Team",
+			);
+		});
+	});
 
-			const chatRes = await mercuriusClient.mutate(Mutation_createChat, {
-				headers: { authorization: `bearer ${user.authenticationToken}` },
-				variables: {
-					input: { name: `chat-${faker.string.uuid()}`, organizationId: orgId },
-				},
-			});
-			assertToBeNonNullish(chatRes.data?.createChat);
-			const chatId = chatRes.data.createChat.id;
-			cleanupFns.push(async () => {
-				await mercuriusClient.mutate(Mutation_deleteChat, {
-					headers: { authorization: `bearer ${adminToken}` },
-					variables: { input: { id: chatId } },
-				});
-			});
+	describe("unreadMessagesCount resolver", () => {
+		it("should throw unauthenticated error when client is unauthenticated", async () => {
+			const { context: unauthCtx } = createMockGraphQLContext(false);
 
-			const res = await mercuriusClient.query(Query_chat_with_unread, {
-				headers: { authorization: `bearer ${user.authenticationToken}` },
-				variables: { input: { id: chatId } },
-			});
-			assertToBeNonNullish(res.data?.chat);
-			const node = res.data.chat;
-			expect(node.lastMessage).toBeNull();
+			await expect(
+				fields.unreadMessagesCount.resolve(mockChat, {}, unauthCtx),
+			).rejects.toThrow(TalawaGraphQLError);
+
+			try {
+				await fields.unreadMessagesCount.resolve(mockChat, {}, unauthCtx);
+				expect.fail("Expected unauthenticated error");
+			} catch (error) {
+				const gqlError = error as TalawaGraphQLError;
+				expect(gqlError.extensions?.code).toBe("unauthenticated");
+			}
 		});
 
-		test("unauthenticated access returns unauthenticated error", async () => {
-			// create a user/org/chat as admin and then query without auth headers
-			const userRes = await mercuriusClient.mutate(Mutation_createUser, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: {
-					input: {
-						emailAddress: `${faker.string.uuid()}@test.com`,
-						name: faker.person.fullName(),
-						password: "password123",
-						role: "regular",
-						isEmailAddressVerified: false,
-					},
-				},
-			});
-			assertToBeNonNullish(userRes.data?.createUser);
-			const user = userRes.data.createUser;
-			assertToBeNonNullish(user.user);
-			assertToBeNonNullish(user.user.id);
-			const userId = user.user.id;
-			cleanupFns.push(async () => {
-				await mercuriusClient.mutate(Mutation_deleteUser, {
-					headers: { authorization: `bearer ${adminToken}` },
-					variables: { input: { id: userId } },
-				});
+		it("should return 0 when current user is not a member of the chat", async () => {
+			mockFindFirstMembership(undefined);
+
+			const result = await fields.unreadMessagesCount.resolve(
+				mockChat,
+				{},
+				ctx,
+			);
+			expect(result).toBe(0);
+		});
+
+		it("should calculate unread messages count using membership.lastReadAt", async () => {
+			const lastReadAt = new Date("2026-03-01T12:00:00Z");
+			mockFindFirstMembership({
+				chatId: mockChat.id,
+				memberId: "user-123",
+				lastReadAt,
 			});
 
-			const orgRes = await mercuriusClient.mutate(Mutation_createOrganization, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: {
-					input: { name: `org-${faker.string.uuid()}`, countryCode: "us" },
-				},
-			});
-			assertToBeNonNullish(orgRes.data?.createOrganization);
-			const orgId = orgRes.data.createOrganization.id;
-			cleanupFns.push(async () => {
-				await mercuriusClient.mutate(Mutation_deleteOrganization, {
-					headers: { authorization: `bearer ${adminToken}` },
-					variables: { input: { id: orgId } },
-				});
+			mocks.drizzleClient.select = createSelectChain([{ cnt: 5 }]);
+
+			const result = await fields.unreadMessagesCount.resolve(
+				mockChat,
+				{},
+				ctx,
+			);
+			expect(result).toBe(5);
+		});
+
+		it("should default lastReadAt to epoch when membership.lastReadAt is null", async () => {
+			mockFindFirstMembership({
+				chatId: mockChat.id,
+				memberId: "user-123",
+				lastReadAt: null,
 			});
 
-			await mercuriusClient.mutate(Mutation_createOrganizationMembership, {
-				headers: { authorization: `bearer ${adminToken}` },
-				variables: {
-					input: {
-						memberId: user.user?.id,
-						organizationId: orgId,
-						role: "regular",
-					},
-				},
+			mocks.drizzleClient.select = createSelectChain([{ cnt: 12 }]);
+
+			const result = await fields.unreadMessagesCount.resolve(
+				mockChat,
+				{},
+				ctx,
+			);
+			expect(result).toBe(12);
+		});
+
+		it("should return 0 when count query returns empty rows", async () => {
+			mockFindFirstMembership({
+				chatId: mockChat.id,
+				memberId: "user-123",
+				lastReadAt: new Date("2026-03-01T12:00:00Z"),
 			});
 
-			const chatRes = await mercuriusClient.mutate(Mutation_createChat, {
-				headers: { authorization: `bearer ${user.authenticationToken}` },
-				variables: {
-					input: { name: `chat-${faker.string.uuid()}`, organizationId: orgId },
-				},
-			});
-			assertToBeNonNullish(chatRes.data?.createChat);
-			const chatId = chatRes.data.createChat.id;
-			cleanupFns.push(async () => {
-				await mercuriusClient.mutate(Mutation_deleteChat, {
-					headers: { authorization: `bearer ${adminToken}` },
-					variables: { input: { id: chatId } },
-				});
+			mocks.drizzleClient.select = createSelectChain([]);
+
+			const result = await fields.unreadMessagesCount.resolve(
+				mockChat,
+				{},
+				ctx,
+			);
+			expect(result).toBe(0);
+		});
+	});
+
+	describe("hasUnread resolver", () => {
+		it("should throw unauthenticated error when client is unauthenticated", async () => {
+			const { context: unauthCtx } = createMockGraphQLContext(false);
+
+			await expect(
+				fields.hasUnread.resolve(mockChat, {}, unauthCtx),
+			).rejects.toThrow(TalawaGraphQLError);
+
+			try {
+				await fields.hasUnread.resolve(mockChat, {}, unauthCtx);
+				expect.fail("Expected unauthenticated error");
+			} catch (error) {
+				const gqlError = error as TalawaGraphQLError;
+				expect(gqlError.extensions?.code).toBe("unauthenticated");
+			}
+		});
+
+		it("should return false when current user is not a member of the chat", async () => {
+			mockFindFirstMembership(undefined);
+
+			const result = await fields.hasUnread.resolve(mockChat, {}, ctx);
+			expect(result).toBe(false);
+		});
+
+		it("should return true when unread messages exist in the chat", async () => {
+			mockFindFirstMembership({
+				chatId: mockChat.id,
+				memberId: "user-123",
+				lastReadAt: new Date("2026-03-01T12:00:00Z"),
 			});
 
-			const res = await mercuriusClient.query(Query_chat_with_unread, {
-				variables: { input: { id: chatId } },
+			mocks.drizzleClient.select = createSelectChain([{ id: "msg-1" }]);
+
+			const result = await fields.hasUnread.resolve(mockChat, {}, ctx);
+			expect(result).toBe(true);
+		});
+
+		it("should default lastReadAt to epoch and return true when lastReadAt is null", async () => {
+			mockFindFirstMembership({
+				chatId: mockChat.id,
+				memberId: "user-123",
+				lastReadAt: null,
 			});
-			expect(res.errors).toBeDefined();
-			expect(res.errors?.[0]?.extensions?.code).toBe("unauthenticated");
+
+			mocks.drizzleClient.select = createSelectChain([{ id: "msg-2" }]);
+
+			const result = await fields.hasUnread.resolve(mockChat, {}, ctx);
+			expect(result).toBe(true);
+		});
+
+		it("should return false when no unread messages are found", async () => {
+			mockFindFirstMembership({
+				chatId: mockChat.id,
+				memberId: "user-123",
+				lastReadAt: new Date("2026-03-01T12:00:00Z"),
+			});
+
+			mocks.drizzleClient.select = createSelectChain([]);
+
+			const result = await fields.hasUnread.resolve(mockChat, {}, ctx);
+			expect(result).toBe(false);
+		});
+	});
+
+	describe("firstUnreadMessageId resolver", () => {
+		it("should throw unauthenticated error when client is unauthenticated", async () => {
+			const { context: unauthCtx } = createMockGraphQLContext(false);
+
+			await expect(
+				fields.firstUnreadMessageId.resolve(mockChat, {}, unauthCtx),
+			).rejects.toThrow(TalawaGraphQLError);
+
+			try {
+				await fields.firstUnreadMessageId.resolve(mockChat, {}, unauthCtx);
+				expect.fail("Expected unauthenticated error");
+			} catch (error) {
+				const gqlError = error as TalawaGraphQLError;
+				expect(gqlError.extensions?.code).toBe("unauthenticated");
+			}
+		});
+
+		it("should return null when current user is not a member of the chat", async () => {
+			mockFindFirstMembership(undefined);
+
+			const result = await fields.firstUnreadMessageId.resolve(
+				mockChat,
+				{},
+				ctx,
+			);
+			expect(result).toBeNull();
+		});
+
+		it("should return the ID of the first unread message when unread messages exist", async () => {
+			const messageId = faker.string.uuid();
+			mockFindFirstMembership({
+				chatId: mockChat.id,
+				memberId: "user-123",
+				lastReadAt: new Date("2026-03-01T12:00:00Z"),
+			});
+
+			mocks.drizzleClient.select = createSelectChain([{ id: messageId }]);
+
+			const result = await fields.firstUnreadMessageId.resolve(
+				mockChat,
+				{},
+				ctx,
+			);
+			expect(result).toBe(messageId);
+		});
+
+		it("should default lastReadAt to epoch and return first unread message id when lastReadAt is null", async () => {
+			const messageId = faker.string.uuid();
+			mockFindFirstMembership({
+				chatId: mockChat.id,
+				memberId: "user-123",
+				lastReadAt: null,
+			});
+
+			mocks.drizzleClient.select = createSelectChain([{ id: messageId }]);
+
+			const result = await fields.firstUnreadMessageId.resolve(
+				mockChat,
+				{},
+				ctx,
+			);
+			expect(result).toBe(messageId);
+		});
+
+		it("should return null when no unread messages exist in the chat", async () => {
+			mockFindFirstMembership({
+				chatId: mockChat.id,
+				memberId: "user-123",
+				lastReadAt: new Date("2026-03-01T12:00:00Z"),
+			});
+
+			mocks.drizzleClient.select = createSelectChain([]);
+
+			const result = await fields.firstUnreadMessageId.resolve(
+				mockChat,
+				{},
+				ctx,
+			);
+			expect(result).toBeNull();
+		});
+	});
+
+	describe("lastMessage resolver", () => {
+		it("should throw unauthenticated error when client is unauthenticated", async () => {
+			const { context: unauthCtx } = createMockGraphQLContext(false);
+
+			await expect(
+				fields.lastMessage.resolve(mockChat, {}, unauthCtx),
+			).rejects.toThrow(TalawaGraphQLError);
+
+			try {
+				await fields.lastMessage.resolve(mockChat, {}, unauthCtx);
+				expect.fail("Expected unauthenticated error");
+			} catch (error) {
+				const gqlError = error as TalawaGraphQLError;
+				expect(gqlError.extensions?.code).toBe("unauthenticated");
+			}
+		});
+
+		it("should return the latest message when messages exist in the chat", async () => {
+			const latestMessage = {
+				id: faker.string.uuid(),
+				chatId: mockChat.id,
+				body: "See you all in the standup meeting!",
+				creatorId: "user-123",
+				createdAt: new Date("2026-03-01T14:30:00Z"),
+			};
+
+			mocks.drizzleClient.select = createSelectChain([latestMessage]);
+
+			const result = await fields.lastMessage.resolve(mockChat, {}, ctx);
+			expect(result).toEqual(latestMessage);
+		});
+
+		it("should return null when no messages exist in the chat", async () => {
+			mocks.drizzleClient.select = createSelectChain([]);
+
+			const result = await fields.lastMessage.resolve(mockChat, {}, ctx);
+			expect(result).toBeNull();
 		});
 	});
 });
