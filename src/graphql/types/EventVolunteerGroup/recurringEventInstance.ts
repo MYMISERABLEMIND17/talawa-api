@@ -3,6 +3,17 @@ import type { GraphQLContext } from "../../context";
 import type { EventVolunteerGroup as EventVolunteerGroupType } from "./EventVolunteerGroup";
 import { EventVolunteerGroup } from "./EventVolunteerGroup";
 
+/**
+ * Resolver function for the `recurringEventInstance` field on `EventVolunteerGroup`.
+ *
+ * Resolves the recurring event instance associated with the volunteer group by querying
+ * the recurring event instances table and merging it with its underlying base recurring event.
+ *
+ * @param parent - The parent `EventVolunteerGroup` object.
+ * @param _args - Empty arguments object for this field resolver.
+ * @param ctx - The GraphQL execution context containing the Drizzle database client.
+ * @returns A promise resolving to the merged event instance object with attachments, or `null` if not found.
+ */
 export const RecurringEventInstanceResolver = async (
 	parent: EventVolunteerGroupType,
 	_args: Record<string, never>,

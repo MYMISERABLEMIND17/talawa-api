@@ -1,105 +1,199 @@
+import { faker } from "@faker-js/faker";
 import { createMockGraphQLContext } from "test/_Mocks_/mockContextCreator/mockContextCreator";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { GraphQLContext } from "~/src/graphql/context";
+import { Event } from "~/src/graphql/types/Event/Event";
+import type { EventVolunteerGroup as EventVolunteerGroupType } from "~/src/graphql/types/EventVolunteerGroup/EventVolunteerGroup";
 import { RecurringEventInstanceResolver } from "~/src/graphql/types/EventVolunteerGroup/recurringEventInstance";
 
-// Mock parent EventVolunteerGroup
-const mockEventVolunteerGroup = {
-	id: "group-123",
-	eventId: "event-123",
-	leaderId: "leader-123",
-	creatorId: "creator-123",
-	name: "Setup Team",
-	description: "Handles event setup and preparation",
-	volunteersRequired: 5,
-	createdAt: new Date("2024-01-01T10:00:00Z"),
-	updatedAt: new Date("2024-01-01T12:00:00Z"),
-	updaterId: "updater-123",
-	recurringEventInstanceId: "recurring-instance-123",
-	isTemplate: false,
+const { implementSpy } = vi.hoisted(() => {
+	const implement = vi.fn();
+	return { implementSpy: implement };
+});
+
+vi.mock("~/src/graphql/types/EventVolunteerGroup/EventVolunteerGroup", () => ({
+	EventVolunteerGroup: {
+		implement: implementSpy,
+	},
+}));
+
+type MockInstance = {
+	id: string;
+	baseRecurringEventId: string;
+	organizationId: string;
+	creatorId: string;
+	createdAt: Date;
+	startAt: Date;
+	endAt: Date;
+	isRecurringEventTemplate: boolean;
+	recurrenceRule?: string;
 };
 
-const mockRecurringEventInstance = {
-	id: "recurring-instance-123",
-	baseRecurringEventId: "base-event-123",
-	organizationId: "org-123",
-	creatorId: "creator-123",
-	createdAt: new Date("2024-01-01T10:00:00Z"),
-	startAt: new Date("2024-02-01T14:00:00Z"),
-	endAt: new Date("2024-02-01T16:00:00Z"),
-	isRecurringEventTemplate: false,
+type MockBaseEvent = {
+	id: string;
+	name: string;
+	organizationId: string;
+	creatorId: string;
+	createdAt: Date;
+	updatedAt: Date;
+	startAt: Date;
+	endAt: Date;
+	description: string;
+	location: string;
+	allDay: boolean;
+	isPublic: boolean;
+	isRegisterable: boolean;
+	updaterId: string;
+	isRecurringEventTemplate: boolean;
 };
 
-const mockBaseEvent = {
-	id: "base-event-123",
-	name: "Recurring Event Template",
-	organizationId: "org-123",
-	creatorId: "creator-123",
-	createdAt: new Date("2023-12-01T10:00:00Z"),
-	updatedAt: new Date("2023-12-15T12:00:00Z"),
-	startAt: new Date("2024-01-01T14:00:00Z"),
-	endAt: new Date("2024-01-01T16:00:00Z"),
-	description: "Recurring event description",
-	location: "Recurring location",
-	allDay: false,
-	isPublic: true,
-	isRegisterable: true,
-	updaterId: "updater-123",
-	isRecurringEventTemplate: true,
+type FieldOptions = {
+	type: unknown;
+	description: string;
+	nullable: boolean;
+	resolve: typeof RecurringEventInstanceResolver;
 };
 
-describe("RecurringEventInstanceResolver", () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
+describe("EventVolunteerGroup.recurringEventInstance", () => {
+	let ctx: GraphQLContext;
+	let mocks: ReturnType<typeof createMockGraphQLContext>["mocks"];
+	let mockVolunteerGroup: EventVolunteerGroupType;
+	let testInstanceId: string;
+	let testBaseEventId: string;
+	let testOrgId: string;
+
+	let capturedImplementCall:
+		| { fields: (t: unknown) => { recurringEventInstance: FieldOptions } }
+		| undefined;
+
+	beforeAll(() => {
+		capturedImplementCall = implementSpy.mock.calls[0]?.[0];
 	});
 
-	describe("Authentication", () => {
-		it("should not throw unauthenticated error (field is nullable and no auth check)", async () => {
-			const { context } = createMockGraphQLContext(false);
+	beforeEach(() => {
+		vi.clearAllMocks();
+
+		testInstanceId = faker.string.uuid();
+		testBaseEventId = faker.string.uuid();
+		testOrgId = faker.string.uuid();
+
+		const { context, mocks: newMocks } = createMockGraphQLContext(
+			true,
+			faker.string.uuid(),
+		);
+		ctx = context;
+		mocks = newMocks;
+
+		mockVolunteerGroup = {
+			id: faker.string.uuid(),
+			eventId: faker.string.uuid(),
+			leaderId: faker.string.uuid(),
+			creatorId: faker.string.uuid(),
+			name: faker.company.name(),
+			description: faker.lorem.sentence(),
+			volunteersRequired: 5,
+			createdAt: new Date("2026-01-01T10:00:00Z"),
+			updatedAt: new Date("2026-01-01T12:00:00Z"),
+			updaterId: faker.string.uuid(),
+			recurringEventInstanceId: testInstanceId,
+			isTemplate: false,
+		} as EventVolunteerGroupType;
+	});
+
+	describe("Schema Field Registration", () => {
+		it("implements EventVolunteerGroup recurringEventInstance field correctly", () => {
+			expect(capturedImplementCall).toBeDefined();
+
+			const tStub = {
+				field: vi.fn((opts: FieldOptions) => opts),
+			};
+
+			const fields = capturedImplementCall?.fields(tStub);
+			expect(tStub.field).toHaveBeenCalledWith({
+				type: Event,
+				description:
+					"The recurring event instance associated with this volunteer group.",
+				nullable: true,
+				resolve: RecurringEventInstanceResolver,
+			});
+
+			expect(fields).toHaveProperty("recurringEventInstance");
+			expect(fields?.recurringEventInstance.description).toBe(
+				"The recurring event instance associated with this volunteer group.",
+			);
+			expect(fields?.recurringEventInstance.nullable).toBe(true);
+			expect(fields?.recurringEventInstance.resolve).toBe(
+				RecurringEventInstanceResolver,
+			);
+		});
+	});
+
+	describe("Authentication & Parent ID Validation", () => {
+		it("should return null when parent.recurringEventInstanceId is null", async () => {
+			const groupWithoutInstance = {
+				...mockVolunteerGroup,
+				recurringEventInstanceId: null,
+			};
 
 			const result = await RecurringEventInstanceResolver(
-				mockEventVolunteerGroup,
+				groupWithoutInstance,
 				{},
-				context,
+				ctx,
 			);
 
-			// Since the resolver doesn't check authentication, it proceeds
-			// We'll test the query anyway
-			expect(result).toBeDefined();
+			expect(result).toBeNull();
+			expect(
+				mocks.drizzleClient.query.recurringEventInstancesTable.findFirst,
+			).not.toHaveBeenCalled();
+		});
+
+		it("should return null when parent.recurringEventInstanceId is undefined", async () => {
+			const groupWithoutInstance = {
+				...mockVolunteerGroup,
+				recurringEventInstanceId: undefined as unknown as null,
+			};
+
+			const result = await RecurringEventInstanceResolver(
+				groupWithoutInstance,
+				{},
+				ctx,
+			);
+
+			expect(result).toBeNull();
+			expect(
+				mocks.drizzleClient.query.recurringEventInstancesTable.findFirst,
+			).not.toHaveBeenCalled();
+		});
+
+		it("should return null when parent.recurringEventInstanceId is an empty string", async () => {
+			const groupWithEmptyInstanceId = {
+				...mockVolunteerGroup,
+				recurringEventInstanceId: "",
+			};
+
+			const result = await RecurringEventInstanceResolver(
+				groupWithEmptyInstanceId,
+				{},
+				ctx,
+			);
+
+			expect(result).toBeNull();
+			expect(
+				mocks.drizzleClient.query.recurringEventInstancesTable.findFirst,
+			).not.toHaveBeenCalled();
 		});
 	});
 
 	describe("Resolution Logic", () => {
-		it("should return null when recurringEventInstanceId is null or undefined", async () => {
-			const { context, mocks } = createMockGraphQLContext(true, "user-123");
-
-			const groupWithoutInstanceId = {
-				...mockEventVolunteerGroup,
-				recurringEventInstanceId: null,
-			};
-
-			const result = await RecurringEventInstanceResolver(
-				groupWithoutInstanceId,
-				{},
-				context,
-			);
-
-			expect(result).toBeNull();
-			expect(
-				mocks.drizzleClient.query.recurringEventInstancesTable.findFirst,
-			).not.toHaveBeenCalled();
-		});
-
-		it("should return null when recurring event instance is not found", async () => {
-			const { context, mocks } = createMockGraphQLContext(true, "user-123");
-
+		it("should return null when recurring event instance is not found in database", async () => {
 			mocks.drizzleClient.query.recurringEventInstancesTable.findFirst.mockResolvedValue(
 				undefined,
 			);
 
 			const result = await RecurringEventInstanceResolver(
-				mockEventVolunteerGroup,
+				mockVolunteerGroup,
 				{},
-				context,
+				ctx,
 			);
 
 			expect(result).toBeNull();
@@ -111,20 +205,29 @@ describe("RecurringEventInstanceResolver", () => {
 			).not.toHaveBeenCalled();
 		});
 
-		it("should return null when base event is not found", async () => {
-			const { context, mocks } = createMockGraphQLContext(true, "user-123");
+		it("should return null when instance is found but base recurring event is not found", async () => {
+			const mockInstance: MockInstance = {
+				id: testInstanceId,
+				baseRecurringEventId: testBaseEventId,
+				organizationId: testOrgId,
+				creatorId: faker.string.uuid(),
+				createdAt: new Date("2026-01-01T10:00:00Z"),
+				startAt: new Date("2026-02-01T14:00:00Z"),
+				endAt: new Date("2026-02-01T16:00:00Z"),
+				isRecurringEventTemplate: false,
+			};
 
 			mocks.drizzleClient.query.recurringEventInstancesTable.findFirst.mockResolvedValue(
-				mockRecurringEventInstance,
+				mockInstance,
 			);
 			mocks.drizzleClient.query.eventsTable.findFirst.mockResolvedValue(
 				undefined,
 			);
 
 			const result = await RecurringEventInstanceResolver(
-				mockEventVolunteerGroup,
+				mockVolunteerGroup,
 				{},
-				context,
+				ctx,
 			);
 
 			expect(result).toBeNull();
@@ -136,170 +239,233 @@ describe("RecurringEventInstanceResolver", () => {
 			).toHaveBeenCalledTimes(1);
 		});
 
-		it("should return merged event and instance with empty attachments when both are found", async () => {
-			const { context, mocks } = createMockGraphQLContext(true, "user-123");
+		it("should return merged event and instance with attachments: [] when both exist", async () => {
+			const mockInstance: MockInstance = {
+				id: testInstanceId,
+				baseRecurringEventId: testBaseEventId,
+				organizationId: testOrgId,
+				creatorId: faker.string.uuid(),
+				createdAt: new Date("2026-01-01T10:00:00Z"),
+				startAt: new Date("2026-02-01T14:00:00Z"),
+				endAt: new Date("2026-02-01T16:00:00Z"),
+				isRecurringEventTemplate: false,
+			};
+
+			const mockBaseEvent: MockBaseEvent = {
+				id: testBaseEventId,
+				name: "Volunteer Orientation",
+				organizationId: testOrgId,
+				creatorId: faker.string.uuid(),
+				createdAt: new Date("2025-12-01T10:00:00Z"),
+				updatedAt: new Date("2025-12-15T12:00:00Z"),
+				startAt: new Date("2026-01-01T14:00:00Z"),
+				endAt: new Date("2026-01-01T16:00:00Z"),
+				description: "Orientation for new volunteers",
+				location: "Community Hall",
+				allDay: false,
+				isPublic: true,
+				isRegisterable: true,
+				updaterId: faker.string.uuid(),
+				isRecurringEventTemplate: true,
+			};
 
 			mocks.drizzleClient.query.recurringEventInstancesTable.findFirst.mockResolvedValue(
-				mockRecurringEventInstance,
+				mockInstance,
 			);
 			mocks.drizzleClient.query.eventsTable.findFirst.mockResolvedValue(
 				mockBaseEvent,
 			);
 
 			const result = await RecurringEventInstanceResolver(
-				mockEventVolunteerGroup,
+				mockVolunteerGroup,
 				{},
-				context,
+				ctx,
 			);
 
 			expect(result).toEqual({
 				...mockBaseEvent,
-				...mockRecurringEventInstance,
+				...mockInstance,
 				attachments: [],
 			});
-			expect(result).toHaveProperty("id", mockRecurringEventInstance.id); // Instance id wins due to spread order
-			expect(result).not.toBeNull();
-			if (result) {
-				expect(result.attachments).toEqual([]);
-			}
+			expect(result).toHaveProperty("id", testInstanceId);
+			expect(result).toHaveProperty("name", "Volunteer Orientation");
+			expect(result).toHaveProperty("attachments", []);
 		});
 	});
 
-	describe("Database Queries", () => {
-		it("should call findFirst on recurringEventInstancesTable with correct id", async () => {
-			const { context, mocks } = createMockGraphQLContext(true, "user-123");
-
-			mocks.drizzleClient.query.recurringEventInstancesTable.findFirst.mockResolvedValue(
-				mockRecurringEventInstance,
-			);
-			mocks.drizzleClient.query.eventsTable.findFirst.mockResolvedValue(
-				mockBaseEvent,
-			);
-
-			await RecurringEventInstanceResolver(
-				mockEventVolunteerGroup,
-				{},
-				context,
-			);
-
-			expect(
-				mocks.drizzleClient.query.recurringEventInstancesTable.findFirst,
-			).toHaveBeenCalledWith({
-				where: expect.any(Function),
-			});
-			expect(
-				mocks.drizzleClient.query.eventsTable.findFirst,
-			).toHaveBeenCalledWith({
-				where: expect.any(Function),
-			});
-		});
-
-		it("should query eventsTable with instance's baseRecurringEventId", async () => {
-			const { context, mocks } = createMockGraphQLContext(true, "user-123");
-
-			mocks.drizzleClient.query.recurringEventInstancesTable.findFirst.mockResolvedValue(
-				mockRecurringEventInstance,
-			);
-			mocks.drizzleClient.query.eventsTable.findFirst.mockResolvedValue(
-				mockBaseEvent,
-			);
-
-			await RecurringEventInstanceResolver(
-				mockEventVolunteerGroup,
-				{},
-				context,
-			);
-
-			// The where function should be called with eq(eventsTable.id, mockBaseEvent.id)
-			expect(
-				mocks.drizzleClient.query.eventsTable.findFirst,
-			).toHaveBeenCalledTimes(1);
-		});
-	});
-
-	describe("Edge Cases", () => {
-		it("should handle different recurring event instance IDs", async () => {
-			const { context, mocks } = createMockGraphQLContext(true, "user-123");
-
-			const differentInstance = {
-				...mockRecurringEventInstance,
-				id: "different-instance-456",
-			};
-			const groupWithDifferentId = {
-				...mockEventVolunteerGroup,
-				recurringEventInstanceId: "different-instance-456",
+	describe("Database Query Filters & Callbacks", () => {
+		it("should query recurringEventInstancesTable with where callback matching id", async () => {
+			const mockInstance: MockInstance = {
+				id: testInstanceId,
+				baseRecurringEventId: testBaseEventId,
+				organizationId: testOrgId,
+				creatorId: faker.string.uuid(),
+				createdAt: new Date(),
+				startAt: new Date(),
+				endAt: new Date(),
+				isRecurringEventTemplate: false,
 			};
 
-			mocks.drizzleClient.query.recurringEventInstancesTable.findFirst.mockResolvedValue(
-				differentInstance,
-			);
+			const mockBaseEvent: MockBaseEvent = {
+				id: testBaseEventId,
+				name: "Food Bank Drive",
+				organizationId: testOrgId,
+				creatorId: faker.string.uuid(),
+				createdAt: new Date(),
+				updatedAt: new Date(),
+				startAt: new Date(),
+				endAt: new Date(),
+				description: "Monthly food distribution",
+				location: "Warehouse A",
+				allDay: false,
+				isPublic: true,
+				isRegisterable: true,
+				updaterId: faker.string.uuid(),
+				isRecurringEventTemplate: true,
+			};
+
+			(
+				mocks.drizzleClient.query.recurringEventInstancesTable
+					.findFirst as ReturnType<typeof vi.fn>
+			).mockImplementation(({ where: whereClause }) => {
+				expect(whereClause).toBeDefined();
+
+				const mockFields = { id: "mock-id-field" };
+				const mockOperators = {
+					eq: vi.fn((field, val) => ({ [field]: val })),
+				};
+
+				const whereResult = whereClause(mockFields, mockOperators);
+				expect(mockOperators.eq).toHaveBeenCalledWith(
+					mockFields.id,
+					testInstanceId,
+				);
+				expect(whereResult).toEqual({
+					[mockFields.id]: testInstanceId,
+				});
+
+				return Promise.resolve(mockInstance);
+			});
+
 			mocks.drizzleClient.query.eventsTable.findFirst.mockResolvedValue(
 				mockBaseEvent,
 			);
 
 			const result = await RecurringEventInstanceResolver(
-				groupWithDifferentId,
+				mockVolunteerGroup,
 				{},
-				context,
+				ctx,
 			);
 
-			expect(result).toHaveProperty("id", "different-instance-456");
+			expect(result).toBeDefined();
+			expect(result).toHaveProperty("id", testInstanceId);
 		});
 
-		it("should handle database errors", async () => {
-			const { context, mocks } = createMockGraphQLContext(true, "user-123");
+		it("should query eventsTable with where callback matching baseRecurringEventId", async () => {
+			const mockInstance: MockInstance = {
+				id: testInstanceId,
+				baseRecurringEventId: testBaseEventId,
+				organizationId: testOrgId,
+				creatorId: faker.string.uuid(),
+				createdAt: new Date(),
+				startAt: new Date(),
+				endAt: new Date(),
+				isRecurringEventTemplate: false,
+			};
 
-			mocks.drizzleClient.query.recurringEventInstancesTable.findFirst.mockRejectedValue(
-				new Error("Database error"),
+			const mockBaseEvent: MockBaseEvent = {
+				id: testBaseEventId,
+				name: "Beach Cleanup",
+				organizationId: testOrgId,
+				creatorId: faker.string.uuid(),
+				createdAt: new Date(),
+				updatedAt: new Date(),
+				startAt: new Date(),
+				endAt: new Date(),
+				description: "Weekly coastal cleanup",
+				location: "Coastal Park",
+				allDay: false,
+				isPublic: true,
+				isRegisterable: true,
+				updaterId: faker.string.uuid(),
+				isRecurringEventTemplate: true,
+			};
+
+			mocks.drizzleClient.query.recurringEventInstancesTable.findFirst.mockResolvedValue(
+				mockInstance,
 			);
 
-			await expect(
-				RecurringEventInstanceResolver(mockEventVolunteerGroup, {}, context),
-			).rejects.toThrow("Database error");
+			(
+				mocks.drizzleClient.query.eventsTable.findFirst as ReturnType<
+					typeof vi.fn
+				>
+			).mockImplementation(({ where: whereClause }) => {
+				expect(whereClause).toBeDefined();
+
+				const mockFields = { id: "mock-base-event-id-field" };
+				const mockOperators = {
+					eq: vi.fn((field, val) => ({ [field]: val })),
+				};
+
+				const whereResult = whereClause(mockFields, mockOperators);
+				expect(mockOperators.eq).toHaveBeenCalledWith(
+					mockFields.id,
+					testBaseEventId,
+				);
+				expect(whereResult).toEqual({
+					[mockFields.id]: testBaseEventId,
+				});
+
+				return Promise.resolve(mockBaseEvent);
+			});
+
+			const result = await RecurringEventInstanceResolver(
+				mockVolunteerGroup,
+				{},
+				ctx,
+			);
+
+			expect(result).toBeDefined();
+			expect(result).toHaveProperty("name", "Beach Cleanup");
 		});
 	});
 
-	describe("Performance", () => {
-		it("should make at most two database queries when successful", async () => {
-			const { context, mocks } = createMockGraphQLContext(true, "user-123");
-
-			mocks.drizzleClient.query.recurringEventInstancesTable.findFirst.mockResolvedValue(
-				mockRecurringEventInstance,
-			);
-			mocks.drizzleClient.query.eventsTable.findFirst.mockResolvedValue(
-				mockBaseEvent,
+	describe("Error Handling", () => {
+		it("should reject if recurringEventInstancesTable.findFirst throws an error", async () => {
+			const dbError = new Error("Connection timed out to database");
+			mocks.drizzleClient.query.recurringEventInstancesTable.findFirst.mockRejectedValue(
+				dbError,
 			);
 
-			await RecurringEventInstanceResolver(
-				mockEventVolunteerGroup,
-				{},
-				context,
-			);
-
-			expect(
-				mocks.drizzleClient.query.recurringEventInstancesTable.findFirst,
-			).toHaveBeenCalledTimes(1);
-			expect(
-				mocks.drizzleClient.query.eventsTable.findFirst,
-			).toHaveBeenCalledTimes(1);
+			await expect(
+				RecurringEventInstanceResolver(mockVolunteerGroup, {}, ctx),
+			).rejects.toThrow("Connection timed out to database");
 		});
 
-		it("should not make any queries when recurringEventInstanceId is undefined", async () => {
-			const { context, mocks } = createMockGraphQLContext(true, "user-123");
-
-			const groupWithoutInstanceId = {
-				...mockEventVolunteerGroup,
-				recurringEventInstanceId: null,
+		it("should reject if eventsTable.findFirst throws an error", async () => {
+			const mockInstance: MockInstance = {
+				id: testInstanceId,
+				baseRecurringEventId: testBaseEventId,
+				organizationId: testOrgId,
+				creatorId: faker.string.uuid(),
+				createdAt: new Date(),
+				startAt: new Date(),
+				endAt: new Date(),
+				isRecurringEventTemplate: false,
 			};
 
-			await RecurringEventInstanceResolver(groupWithoutInstanceId, {}, context);
+			mocks.drizzleClient.query.recurringEventInstancesTable.findFirst.mockResolvedValue(
+				mockInstance,
+			);
 
-			expect(
-				mocks.drizzleClient.query.recurringEventInstancesTable.findFirst,
-			).not.toHaveBeenCalled();
-			expect(
-				mocks.drizzleClient.query.eventsTable.findFirst,
-			).not.toHaveBeenCalled();
+			const dbError = new Error("Query execution aborted");
+			mocks.drizzleClient.query.eventsTable.findFirst.mockRejectedValue(
+				dbError,
+			);
+
+			await expect(
+				RecurringEventInstanceResolver(mockVolunteerGroup, {}, ctx),
+			).rejects.toThrow("Query execution aborted");
 		});
 	});
 });
